@@ -1,6 +1,6 @@
 {
     "use_default_config": true,
-    "team_name": "sample_md_client00",
+    "team_name": "CurlFighter-00",
     "player1": {
         "max_velocity": 4.0,
         "shot_std_dev": 0.08,
