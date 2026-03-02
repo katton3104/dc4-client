@@ -32,6 +32,9 @@ FREEZE_VERTICAL_OFFSET = FREEZE_CONTACT_DISTANCE
 FREEZE_DIAGONAL_X = FREEZE_CONTACT_DISTANCE / np.sqrt(2.0)
 FREEZE_DIAGONAL_Y = FREEZE_CONTACT_DISTANCE / np.sqrt(2.0)
 DRAW_BECOME_NO1_EPS = 0.08
+DRAW_DIAGONAL_X = DRAW_BECOME_NO1_EPS / np.sqrt(2.0)
+DRAW_DIAGONAL_Y = DRAW_BECOME_NO1_EPS / np.sqrt(2.0)
+TAP_TO_CENTER_EPS = 0.06
 PLOT_X_MIN = -2.085
 PLOT_X_MAX = 2.085
 PLOT_Y_MIN = 32.004
@@ -117,6 +120,15 @@ def get_active_stones(state_data):
     return stones
 
 
+def get_stone_centroid(state_data):
+    stones = get_active_stones(state_data)
+    if not stones:
+        return 0.0, 0.0, 0
+    centroid_x = float(np.mean([stone["x"] for stone in stones]))
+    centroid_y = float(np.mean([stone["y"] for stone in stones]))
+    return centroid_x, centroid_y, len(stones)
+
+
 def get_no1_stone(state_data):
     stones = get_active_stones(state_data)
     if not stones:
@@ -134,7 +146,7 @@ def clamp_target_for_grid(x, y):
     return x, y
 
 
-def choose_target_position(state_data, my_team_name):
+def choose_target_position(state_data, my_team_name, use_cw):
     no1 = get_no1_stone(state_data)
     total_shots_played = state_data.total_shot_number or 0
     next_shot_index = total_shots_played + 1
@@ -147,23 +159,29 @@ def choose_target_position(state_data, my_team_name):
     no1_y = no1["y"]
     no1_is_my_stone = no1["team"] == my_team_name
 
-    # 1-8投目: No.1 上にフリーズ
-    if next_shot_index <= 8:
-        return no1_x, no1_y
-
-    # 9,10投目: No.1 が相手石なら No.1 になる位置にドロー
+    # No.1 が相手石のときは、9,10投目はドロー、それ以外はヒット/タップ
     if not no1_is_my_stone:
+        # 9,10投目: 回転方向に応じて斜め上へドロー
+        if next_shot_index >= 9:
+            if use_cw:
+                return no1_x + DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
+            return no1_x - DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
+
+        # 1-8投目: 4foot内はヒット（ノーズ）、4foot外は中心方向へタップ
+        if no1["dist"] <= FOUR_FOOT_RADIUS:
+            return no1_x, no1_y
+
         vec_x = HOUSE_CENTER_X - no1_x
         vec_y = HOUSE_CENTER_Y - no1_y
         vec_norm = np.hypot(vec_x, vec_y)
         if vec_norm < 1e-8:
-            return HOUSE_CENTER_X, HOUSE_CENTER_Y
+            return no1_x, no1_y
         return (
-            no1_x + DRAW_BECOME_NO1_EPS * vec_x / vec_norm,
-            no1_y + DRAW_BECOME_NO1_EPS * vec_y / vec_norm,
+            no1_x + TAP_TO_CENTER_EPS * vec_x / vec_norm,
+            no1_y + TAP_TO_CENTER_EPS * vec_y / vec_norm,
         )
 
-    # 9,10投目: No.1 が自石ならフリーズ（4foot の内外で分岐）
+    # フリーズは投目に依らず、4foot の内外で分岐
     if no1["dist"] > FOUR_FOOT_RADIUS:
         # 4foot外: 真下にフリーズ
         return no1_x, no1_y - FREEZE_VERTICAL_OFFSET
@@ -174,33 +192,32 @@ def choose_target_position(state_data, my_team_name):
     return no1_x + side * FREEZE_DIAGONAL_X, no1_y - FREEZE_DIAGONAL_Y
 
 
-def shot_from_grid_velocity(grid_db_manager, target_x, target_y):
+def shot_from_grid_velocity(grid_db_manager, target_x, target_y, use_cw):
     x, y = clamp_target_for_grid(target_x, target_y)
     grid_data = grid_db_manager.get_velocity(position_x=x, position_y=y)
     if grid_data is None:
         return None
 
-    use_cw = (
-        grid_data.cw_velocity_x is not None
-        and grid_data.cw_velocity_y is not None
-        and grid_data.cw_angular_velocity is not None
-    )
-    use_ccw = (
-        grid_data.ccw_velocity_x is not None
-        and grid_data.ccw_velocity_y is not None
-        and grid_data.ccw_angular_velocity is not None
-    )
-
     if use_cw:
+        if (
+            grid_data.cw_velocity_x is None
+            or grid_data.cw_velocity_y is None
+            or grid_data.cw_angular_velocity is None
+        ):
+            return None
         vx = grid_data.cw_velocity_x
         vy = grid_data.cw_velocity_y
         w = grid_data.cw_angular_velocity
-    elif use_ccw:
+    else:
+        if (
+            grid_data.ccw_velocity_x is None
+            or grid_data.ccw_velocity_y is None
+            or grid_data.ccw_angular_velocity is None
+        ):
+            return None
         vx = grid_data.ccw_velocity_x
         vy = grid_data.ccw_velocity_y
         w = grid_data.ccw_angular_velocity
-    else:
-        return None
 
     return np.hypot(vx, vy), np.arctan2(vy, vx), -w / 10.0, x, y, vx, vy, w
 
@@ -250,6 +267,14 @@ def resolve_display_end_count(team0_scores, team1_scores, regulation_ends=8):
 
     return available_ends
 
+
+def get_running_totals(state_data):
+    if state_data.score is None:
+        return 0, 0
+    team0_total = sum(state_data.score.team0 or [])
+    team1_total = sum(state_data.score.team1 or [])
+    return team0_total, team1_total
+
 async def main():
     # 最初のエンドにおいて、team0が先攻、team1が後攻です。
     # デフォルトではteam1となっており、先攻に切り替えたい場合は下記を
@@ -292,16 +317,32 @@ async def main():
     # そのため、AIの初期化などはこの前に行ってください。
     match_team_name: MatchNameModel = await client.send_team_info(client_data)
     grid_db_manager = GridDBManager()
+    first_end_number = None
+    last_logged_final_end_total_shot = None
+    regulation_ends = 8
 
     try:
         async for state_data in client.receive_state_data():
+            if first_end_number is None and state_data.end_number is not None:
+                first_end_number = state_data.end_number
+            final_end_number = (
+                regulation_ends - 1 if first_end_number == 0 else regulation_ends
+            )
+            if (
+                state_data.end_number == final_end_number
+                and state_data.total_shot_number is not None
+                and state_data.total_shot_number != last_logged_final_end_total_shot
+            ):
+                logger.info("\n" + render_ascii_board(state_data, match_team_name.value))
+                last_logged_final_end_total_shot = state_data.total_shot_number
+
             # ゲーム終了の判定
             if (winner_team := client.get_winner_team()) is not None:
                 logger.info("\n" + render_ascii_board(state_data, match_team_name.value))
                 if state_data.score is not None:
                     team0_scores = state_data.score.team0
                     team1_scores = state_data.score.team1
-                    display_end_count = resolve_display_end_count(team0_scores, team1_scores, regulation_ends=8)
+                    display_end_count = resolve_display_end_count(team0_scores, team1_scores, regulation_ends=regulation_ends)
                     if display_end_count > 0:
                         scoreboard = build_scoreboard(
                             team0_scores,
@@ -323,13 +364,27 @@ async def main():
             if state_data.next_shot_team is None and state_data.mix_doubles_settings is not None and state_data.last_move is None:
                 if state_data.mix_doubles_settings.end_setup_team == match_team_name:
                     logger.info("You select the positioned stones.")
-                    # 置き石のパターンを選択します。
-                    # 以下のいずれかを選択してください。
-                    # PositionedStonesModel.center_guard -> 現エンド: ガードを中央に置き、先攻
-                    # PositionedStonesModel.center_house -> 現エンド: ハウスを中央に置き、後攻
-                    # PositionedStonesModel.pp_left      -> 現エンド: パワープレイを実施し、左側に置き、後攻
-                    # PositionedStonesModel.pp_right     -> 現エンド: パワープレイを実施し、右側に置き、後攻
-                    positioned_stones = PositionedStonesModel.pp_left
+                    team0_total, team1_total = get_running_totals(state_data)
+                    my_total = team0_total if match_team_name.value == "team0" else team1_total
+                    opp_total = team1_total if match_team_name.value == "team0" else team0_total
+                    trailing_by_two_or_more = (opp_total - my_total) >= 2
+
+                    if trailing_by_two_or_more:
+                        # 2点差以上で負けている場合は後攻でパワープレーを選択
+                        positioned_stones = PositionedStonesModel.pp_left
+                        logger.info(
+                            "Score %d-%d: trailing by 2+ -> use power play (pp_left).",
+                            my_total,
+                            opp_total,
+                        )
+                    else:
+                        # それ以外は後攻で通常配置
+                        positioned_stones = PositionedStonesModel.center_house
+                        logger.info(
+                            "Score %d-%d: no power play -> use center_house.",
+                            my_total,
+                            opp_total,
+                        )
 
                     # 置き石の情報をサーバに送信します。
                     await client.send_positioned_stones_info(positioned_stones)
@@ -337,8 +392,27 @@ async def main():
             if next_shot_team == match_team_name:
                 total_shots_played = state_data.total_shot_number or 0
                 next_shot_index = total_shots_played + 1
-                target_x, target_y = choose_target_position(state_data, match_team_name.value)
-                shot_values = shot_from_grid_velocity(grid_db_manager, target_x, target_y)
+                centroid_x, centroid_y, stone_count = get_stone_centroid(state_data)
+                use_cw = centroid_x >= 0.0
+                rotation_label = "cw" if use_cw else "ccw"
+                logger.info(
+                    "Stone centroid before shot: count=%d, x=%.3f, y=%.3f -> rotation=%s",
+                    stone_count,
+                    centroid_x,
+                    centroid_y,
+                    rotation_label,
+                )
+                target_x, target_y = choose_target_position(
+                    state_data,
+                    match_team_name.value,
+                    use_cw=use_cw,
+                )
+                shot_values = shot_from_grid_velocity(
+                    grid_db_manager,
+                    target_x,
+                    target_y,
+                    use_cw=use_cw,
+                )
                 if shot_values is not None:
                     (
                         translational_velocity,
@@ -351,7 +425,7 @@ async def main():
                         raw_w,
                     ) = shot_values
                     logger.info(
-                        f"Target=({target_x:.3f}, {target_y:.3f}) -> grid=({grid_x:.1f}, {grid_y:.1f})"
+                        f"Target=({target_x:.3f}, {target_y:.3f}) -> grid=({grid_x:.1f}, {grid_y:.1f}) rotation={rotation_label}"
                     )
                     logger.info(
                         "DB raw values: vx=%.6f, vy=%.6f, w=%.6f",
@@ -361,11 +435,11 @@ async def main():
                     )
                 else:
                     logger.warning(
-                        f"Grid velocity not found for target=({target_x:.3f}, {target_y:.3f}). Use fallback shot."
+                        f"Grid velocity not found for rotation={rotation_label} target=({target_x:.3f}, {target_y:.3f}). Use fallback shot."
                     )
                     # ボタン目掛けて投げる
                     translational_velocity = 2.39758149
-                    angular_velocity = -1.570796327
+                    angular_velocity = -1.570796327 if use_cw else 1.570796327
                     shot_angle = 1.516130711
 
                 logger.info(
@@ -383,6 +457,7 @@ async def main():
                     shot_angle=shot_angle,
                     angular_velocity=angular_velocity,
                 )
+
                 # なお、デジタルカーリング3で使用されていた、(vx, vy, rotation(cw または ccw))での送信も可能です。
                 # vx = 0.0
                 # vy = 2.33

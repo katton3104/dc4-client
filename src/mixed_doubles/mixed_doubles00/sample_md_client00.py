@@ -7,16 +7,146 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FCV1_MAPPING_TABLE_PATH = PROJECT_ROOT / "external" / "FCV1_mapping_table"
+FCV1_MAPPING_TABLE_SRC_PATH = FCV1_MAPPING_TABLE_PATH / "src"
 if FCV1_MAPPING_TABLE_PATH.exists() and str(FCV1_MAPPING_TABLE_PATH) not in sys.path:
     sys.path.insert(0, str(FCV1_MAPPING_TABLE_PATH))
+if FCV1_MAPPING_TABLE_SRC_PATH.exists() and str(FCV1_MAPPING_TABLE_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(FCV1_MAPPING_TABLE_SRC_PATH))
 
 from load_secrets import username, password
 from dc4client.dc_client import DCClient
 from dc4client.send_data import TeamModel, MatchNameModel, PositionedStonesModel
+from grid_database import GridDBManager
 
 formatter = logging.Formatter(
     "%(asctime)s, %(name)s : %(levelname)s - %(message)s"
 )
+
+HOUSE_CENTER_X = 0.0
+HOUSE_CENTER_Y = 38.405
+HOUSE_RADIUS = 1.83
+PLOT_X_MIN = -2.085
+PLOT_X_MAX = 2.085
+PLOT_Y_MIN = 32.004
+PLOT_Y_MAX = 40.234
+PLOT_WIDTH = 61
+PLOT_HEIGHT = 25
+
+
+def get_active_stones(state_data):
+    stones = []
+    if state_data.stone_coordinate is None or state_data.stone_coordinate.data is None:
+        return stones
+
+    for team_name, coords in state_data.stone_coordinate.data.items():
+        for stone in coords:
+            if stone is None:
+                continue
+            x = float(stone.x)
+            y = float(stone.y)
+            if abs(x) < 1e-6 and abs(y) < 1e-6:
+                continue
+            dist = np.hypot(x - HOUSE_CENTER_X, y - HOUSE_CENTER_Y)
+            stones.append({"team": team_name, "x": x, "y": y, "dist": dist})
+    return stones
+
+
+def get_stone_centroid(state_data):
+    stones = get_active_stones(state_data)
+    if not stones:
+        return 0.0, 0.0, 0
+    centroid_x = float(np.mean([stone["x"] for stone in stones]))
+    centroid_y = float(np.mean([stone["y"] for stone in stones]))
+    return centroid_x, centroid_y, len(stones)
+
+
+def get_no1_stone(state_data):
+    stones = get_active_stones(state_data)
+    if not stones:
+        return None
+    in_house = [stone for stone in stones if stone["dist"] <= HOUSE_RADIUS]
+    if not in_house:
+        return None
+    return min(in_house, key=lambda s: s["dist"])
+
+
+def render_ascii_board(state_data, my_team_name):
+    width = PLOT_WIDTH
+    height = PLOT_HEIGHT
+    canvas = [[" " for _ in range(width)] for _ in range(height)]
+
+    def to_col(x):
+        ratio = (x - PLOT_X_MIN) / (PLOT_X_MAX - PLOT_X_MIN)
+        return int(np.clip(round(ratio * (width - 1)), 0, width - 1))
+
+    def to_row(y):
+        ratio = (y - PLOT_Y_MIN) / (PLOT_Y_MAX - PLOT_Y_MIN)
+        return int(np.clip(round((1.0 - ratio) * (height - 1)), 0, height - 1))
+
+    canvas[to_row(HOUSE_CENTER_Y)][to_col(HOUSE_CENTER_X)] = "+"
+
+    stones = get_active_stones(state_data)
+    no1 = get_no1_stone(state_data)
+
+    for stone in sorted(stones, key=lambda s: s["dist"], reverse=True):
+        col = to_col(stone["x"])
+        row = to_row(stone["y"])
+        marker = "M" if stone["team"] == my_team_name else "E"
+        canvas[row][col] = marker
+
+    if no1 is not None:
+        col = to_col(no1["x"])
+        row = to_row(no1["y"])
+        canvas[row][col] = "N" if no1["team"] == my_team_name else "C"
+
+    lines = []
+    header = (
+        f"Board end={state_data.end_number} shot={state_data.total_shot_number} "
+        f"next={state_data.next_shot_team} winner={state_data.winner_team}"
+    ) + f" area[x:{PLOT_X_MIN:.3f}..{PLOT_X_MAX:.3f}, y:{PLOT_Y_MIN:.3f}..{PLOT_Y_MAX:.3f}]"
+    lines.append(header)
+    lines.append("+" + "-" * width + "+")
+    for row in canvas:
+        lines.append("|" + "".join(row) + "|")
+    lines.append("+" + "-" * width + "+")
+    lines.append("Legend: N=No.1(my), C=No.1(enemy), M=my stone, E=enemy stone, +=tee")
+    return "\n".join(lines)
+
+
+def clamp_target_for_grid(x, y):
+    x = round(float(np.clip(x, -2.0, 2.0)), 1)
+    y = round(float(np.clip(y, 32.0, 40.2)), 1)
+    return x, y
+
+
+def shot_from_grid_velocity(grid_db_manager, target_x, target_y, use_cw):
+    x, y = clamp_target_for_grid(target_x, target_y)
+    grid_data = grid_db_manager.get_velocity(position_x=x, position_y=y)
+    if grid_data is None:
+        return None
+
+    if use_cw:
+        if (
+            grid_data.cw_velocity_x is None
+            or grid_data.cw_velocity_y is None
+            or grid_data.cw_angular_velocity is None
+        ):
+            return None
+        vx = grid_data.cw_velocity_x
+        vy = grid_data.cw_velocity_y
+        w = grid_data.cw_angular_velocity
+    else:
+        if (
+            grid_data.ccw_velocity_x is None
+            or grid_data.ccw_velocity_y is None
+            or grid_data.ccw_angular_velocity is None
+        ):
+            return None
+        vx = grid_data.ccw_velocity_x
+        vy = grid_data.ccw_velocity_y
+        w = grid_data.ccw_angular_velocity
+
+    return np.hypot(vx, vy), np.arctan2(vy, vx), -w / 10.0, x, y, vx, vy, w
 
 def build_scoreboard(team0_scores, team1_scores, end_count, my_team_name):
     headers = [f"E{i}" for i in range(1, end_count + 1)] + ["TOTAL"]
@@ -104,11 +234,29 @@ async def main():
     # 最初の置き石を設定するチームが、サーバに置き石の設定を送信したら思考時間のカウントが始まります。
     # そのため、AIの初期化などはこの前に行ってください。
     match_team_name: MatchNameModel = await client.send_team_info(client_data)
+    grid_db_manager = GridDBManager()
+    first_end_number = None
+    last_logged_final_end_total_shot = None
+    regulation_ends = 8
 
     try:
         async for state_data in client.receive_state_data():
+            if first_end_number is None and state_data.end_number is not None:
+                first_end_number = state_data.end_number
+            final_end_number = (
+                regulation_ends - 1 if first_end_number == 0 else regulation_ends
+            )
+            if (
+                state_data.end_number == final_end_number
+                and state_data.total_shot_number is not None
+                and state_data.total_shot_number != last_logged_final_end_total_shot
+            ):
+                logger.info("\n" + render_ascii_board(state_data, match_team_name.value))
+                last_logged_final_end_total_shot = state_data.total_shot_number
+
             # ゲーム終了の判定
             if (winner_team := client.get_winner_team()) is not None:
+                logger.info("\n" + render_ascii_board(state_data, match_team_name.value))
                 if state_data.score is not None:
                     team0_scores = state_data.score.team0
                     team1_scores = state_data.score.team1
@@ -146,16 +294,65 @@ async def main():
                     await client.send_positioned_stones_info(positioned_stones)
 
             if next_shot_team == match_team_name:
-                #await asyncio.sleep(2)
+                total_shots_played = state_data.total_shot_number or 0
+                next_shot_index = total_shots_played + 1
+                centroid_x, centroid_y, stone_count = get_stone_centroid(state_data)
+                use_cw = centroid_x >= 0.0
+                rotation_label = "cw" if use_cw else "ccw"
+                logger.info(
+                    "Stone centroid before shot: count=%d, x=%.3f, y=%.3f -> rotation=%s",
+                    stone_count,
+                    centroid_x,
+                    centroid_y,
+                    rotation_label,
+                )
 
-                #translational_velocity = 2.3
-                #angular_velocity = -np.pi / 2
-                #shot_angle = np.pi / 2
+                target_x, target_y = HOUSE_CENTER_X, HOUSE_CENTER_Y
+                shot_values = shot_from_grid_velocity(
+                    grid_db_manager,
+                    target_x,
+                    target_y,
+                    use_cw=use_cw,
+                )
+                if shot_values is not None:
+                    (
+                        translational_velocity,
+                        shot_angle,
+                        angular_velocity,
+                        grid_x,
+                        grid_y,
+                        raw_vx,
+                        raw_vy,
+                        raw_w,
+                    ) = shot_values
+                    logger.info(
+                        "DB lookup rotation=%s target=(%.3f, %.3f) -> grid=(%.1f, %.1f)",
+                        rotation_label,
+                        target_x,
+                        target_y,
+                        grid_x,
+                        grid_y,
+                    )
+                else:
+                    logger.warning(
+                        "Grid velocity not found for rotation=%s target=(%.3f, %.3f). Use fallback shot.",
+                        rotation_label,
+                        target_x,
+                        target_y,
+                    )
+                    translational_velocity = 2.39758149
+                    shot_angle = 1.516130711
+                    angular_velocity = -1.570796327 if use_cw else 1.570796327
 
-                # ボタン目掛けて投げる
-                translational_velocity = 2.39758149
-                angular_velocity = -1.570796327
-                shot_angle = 1.516130711
+                logger.info(
+                    "Shot %d: target=(%.3f, %.3f), shot=(v=%.6f, angle=%.6f, omega=%.6f)",
+                    next_shot_index,
+                    target_x,
+                    target_y,
+                    translational_velocity,
+                    shot_angle,
+                    angular_velocity,
+                )
 
                 await client.send_shot_info(
                     translational_velocity=translational_velocity,
