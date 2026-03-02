@@ -34,7 +34,6 @@ FREEZE_DIAGONAL_Y = FREEZE_CONTACT_DISTANCE / np.sqrt(2.0)
 DRAW_BECOME_NO1_EPS = 0.08
 DRAW_DIAGONAL_X = DRAW_BECOME_NO1_EPS / np.sqrt(2.0)
 DRAW_DIAGONAL_Y = DRAW_BECOME_NO1_EPS / np.sqrt(2.0)
-TAP_TO_CENTER_EPS = 0.06
 PLOT_X_MIN = -2.085
 PLOT_X_MAX = 2.085
 PLOT_Y_MIN = 32.004
@@ -157,36 +156,18 @@ def choose_target_position(state_data, my_team_name, use_cw):
 
     no1_x = no1["x"]
     no1_y = no1["y"]
-    no1_is_my_stone = no1["team"] == my_team_name
 
-    # No.1 が相手石のときは、9,10投目はドロー、それ以外はヒット/タップ
-    if not no1_is_my_stone:
-        # 9,10投目: 回転方向に応じて斜め上へドロー
-        if next_shot_index >= 9:
-            if use_cw:
-                return no1_x + DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
-            return no1_x - DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
+    # 9,10投目: 回転方向に応じて斜め上へドロー(タップ)
+    if next_shot_index >= 9:
+        if use_cw:
+            return no1_x + DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
+        return no1_x - DRAW_DIAGONAL_X, no1_y + DRAW_DIAGONAL_Y
 
-        # 1-8投目: 4foot内はヒット（ノーズ）、4foot外は中心方向へタップ
-        if no1["dist"] <= FOUR_FOOT_RADIUS:
-            return no1_x, no1_y
-
-        vec_x = HOUSE_CENTER_X - no1_x
-        vec_y = HOUSE_CENTER_Y - no1_y
-        vec_norm = np.hypot(vec_x, vec_y)
-        if vec_norm < 1e-8:
-            return no1_x, no1_y
-        return (
-            no1_x + TAP_TO_CENTER_EPS * vec_x / vec_norm,
-            no1_y + TAP_TO_CENTER_EPS * vec_y / vec_norm,
-        )
-
-    # フリーズは投目に依らず、4foot の内外で分岐
-    if no1["dist"] > FOUR_FOOT_RADIUS:
-        # 4foot外: 真下にフリーズ
+    # 1-8投目: 4foot内は真下にフリーズ、4foot外は斜め下内側へフリーズ
+    if no1["dist"] <= FOUR_FOOT_RADIUS:
         return no1_x, no1_y - FREEZE_VERTICAL_OFFSET
 
-    # 4foot内: 石が内側に来るように斜め下へフリーズ
+    # 4foot外: 石が内側に来るように斜め下へフリーズ
     to_center_x = HOUSE_CENTER_X - no1_x
     side = np.sign(to_center_x) if abs(to_center_x) > 1e-8 else 1.0
     return no1_x + side * FREEZE_DIAGONAL_X, no1_y - FREEZE_DIAGONAL_Y
