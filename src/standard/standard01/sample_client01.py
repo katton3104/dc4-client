@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-FCV1_MAPPING_TABLE_PATH = PROJECT_ROOT / "external" / "FCV1_mapping_table"
+FCV1_MAPPING_TABLE_PATH = PROJECT_ROOT / "src" / "external" / "FCV1_mapping_table"
 if FCV1_MAPPING_TABLE_PATH.exists() and str(FCV1_MAPPING_TABLE_PATH) not in sys.path:
     sys.path.insert(0, str(FCV1_MAPPING_TABLE_PATH))
 
